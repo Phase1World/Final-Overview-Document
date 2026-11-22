@@ -33,12 +33,14 @@
     #viewer {
       display: flex; flex-direction: column; align-items: center;
       gap: 16px; padding: 20px 12px 40px;
+      overflow-x: auto;
     }
-    canvas {
-      display: block; max-width: none;
-      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+    .page {
       background: #fff;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      flex: none;
     }
+    .page canvas { display: block; max-width: none; }
     #status { padding: 40px; color: #aaa; text-align: center; }
     @media (max-width: 600px) {
       header h1 { font-size: 13px; }
@@ -54,7 +56,7 @@
       <span id="zoomLabel">Fit</span>
       <button id="zoomIn" title="Zoom in">+</button>
       <button id="fit" title="Fit to width">Fit</button>
-      <a class="btn" id="download" href="Final%20Overview@20Document.pdf" download>Download</a>
+      <a class="btn" id="download" href="#" download>Download</a>
     </div>
   </header>
 
@@ -63,8 +65,12 @@
   </main>
 
   <script>
-    // Name of the PDF file sitting next to this index.html in the repo
-    const PDF_URL = "Final@20Overview%20Document.pdf";
+    // Must match the PDF's filename in the repo EXACTLY (same folder as index.html, case-sensitive).
+    const PDF_FILE = "Final_Overview_Document.pdf";
+    const PDF_URL = encodeURI(PDF_FILE);
+
+    document.getElementById("download").href = PDF_URL;
+    document.getElementById("download").setAttribute("download", PDF_FILE);
 
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -76,6 +82,7 @@
     let pdfDoc = null;
     let zoom = null;        // null = fit to width
     let renderToken = 0;
+    let observer = null;
 
     function fitScale(page) {
       const base = page.getViewport({ scale: 1 });
@@ -83,36 +90,68 @@
       return available / base.width;
     }
 
+    async function renderPageInto(holder, pageNum, scale, token) {
+      if (holder.dataset.rendered) return;
+      holder.dataset.rendered = "1";
+      const page = await pdfDoc.getPage(pageNum);
+      if (token !== renderToken) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      canvas.width = Math.floor(viewport.width * dpr);
+      canvas.height = Math.floor(viewport.height * dpr);
+      canvas.style.width = Math.floor(viewport.width) + "px";
+      canvas.style.height = Math.floor(viewport.height) + "px";
+
+      await page.render({
+        canvasContext: ctx,
+        viewport,
+        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null
+      }).promise;
+
+      if (token !== renderToken) return;
+      holder.appendChild(canvas);
+    }
+
     async function renderAll() {
       if (!pdfDoc) return;
       const token = ++renderToken;
+      if (observer) observer.disconnect();
       viewer.innerHTML = "";
-      const dpr = window.devicePixelRatio || 1;
 
+      const firstPage = await pdfDoc.getPage(1);
+      const scale = zoom ?? fitScale(firstPage);
+      zoomLabel.textContent = zoom ? Math.round(zoom * 100) + "%" : "Fit";
+
+      // Create correctly sized placeholders for every page, render lazily when near the viewport
+      const holders = [];
       for (let n = 1; n <= pdfDoc.numPages; n++) {
         const page = await pdfDoc.getPage(n);
         if (token !== renderToken) return;
-
-        const scale = zoom ?? fitScale(page);
-        zoomLabel.textContent = zoom ? Math.round(zoom * 100) + "%" : "Fit";
-
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-
-        // Render at device pixel ratio for crisp output on retina / phones
-        canvas.width = Math.floor(viewport.width * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width = Math.floor(viewport.width) + "px";
-        canvas.style.height = Math.floor(viewport.height) + "px";
-        viewer.appendChild(canvas);
-
-        await page.render({
-          canvasContext: ctx,
-          viewport,
-          transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null
-        }).promise;
+        const vp = page.getViewport({ scale });
+        const holder = document.createElement("div");
+        holder.className = "page";
+        holder.dataset.page = n;
+        holder.style.width = Math.floor(vp.width) + "px";
+        holder.style.height = Math.floor(vp.height) + "px";
+        viewer.appendChild(holder);
+        holders.push(holder);
       }
+
+      observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            renderPageInto(entry.target, Number(entry.target.dataset.page), scale, token)
+              .catch(console.error);
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { rootMargin: "1200px 0px" });
+
+      holders.forEach((h) => observer.observe(h));
     }
 
     async function currentScale() {
@@ -132,7 +171,11 @@
     document.getElementById("fit").onclick = () => { zoom = null; renderAll(); };
 
     let resizeTimer;
+    let lastWidth = window.innerWidth;
     window.addEventListener("resize", () => {
+      // Ignore height-only resizes (mobile address bar show/hide)
+      if (window.innerWidth === lastWidth) return;
+      lastWidth = window.innerWidth;
       if (zoom !== null) return;
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(renderAll, 200);
@@ -144,6 +187,8 @@
         statusEl.innerHTML =
           "Couldn't load the PDF.<br><small>" + err.message +
           "</small><br><br><a class='btn' href='" + PDF_URL + "'>Open PDF directly</a>";
+        viewer.innerHTML = "";
+        viewer.appendChild(statusEl);
         console.error(err);
       });
   </script>
